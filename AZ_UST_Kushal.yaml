@@ -1,0 +1,131 @@
+trigger:
+- main
+
+resources:
+  repositories:
+    - repository: self
+      type: git
+      ref: refs/heads/main
+
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: 'dev'
+    values:
+    - dev
+    - staging
+    - prod
+
+variables:
+  # Global Variables
+  - name: projectName
+    value: 'MyProject'
+  - name: smtpServer
+    value: 'smtp.example.com'
+  - name: smtpUsername
+    value: 'user@example.com'
+  - name: smtpPassword
+    value: 'password'
+
+stages:
+  - stage: Build
+    displayName: 'Build Stage'
+    variables:
+      # Local Variables for Build Stage
+      - name: buildVmImage
+        value: 'ubuntu-latest'
+    jobs:
+      - job: BuildJob
+        displayName: 'Building the code'
+        pool:
+          vmImage: $(buildVmImage)
+        steps:
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: '6.x'
+              installationPath: $(Agent.ToolsDirectory)/dotnet
+          - task: DotNetCoreCLI@2
+            inputs:
+              command: 'restore'
+              projects: '**/*.csproj'
+          - task: DotNetCoreCLI@2
+            inputs:
+              command: 'build'
+              projects: '**/*.csproj'
+          - script: |
+              echo "##vso[task.setvariable variable=buildOutputPath]$(Build.SourcesDirectory)/output"
+            displayName: 'Set Build Output Path'
+
+  - stage: Test
+    displayName: 'Test Stage'
+    dependsOn: Build
+    variables:
+      # Local Variables for Test Stage
+      - name: testVmImage
+        value: 'ubuntu-latest'
+      - name: buildOutputPath
+        value: $[ dependencies.Build.outputs['BuildJob.buildOutputPath'] ]
+    jobs:
+      - job: TestJob
+        displayName: 'Running Tests'
+        pool:
+          vmImage: $(testVmImage)
+        steps:
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: '6.x'
+              installationPath: $(Agent.ToolsDirectory)/dotnet
+          - task: DotNetCoreCLI@2
+            inputs:
+              command: 'test'
+              projects: '**/*.csproj'
+          - script: echo "Sending email notification..."
+            displayName: 'Send email notification'
+            env:
+              SMTP_SERVER: $(smtpServer)
+              SMTP_USERNAME: $(smtpUsername)
+              SMTP_PASSWORD: $(smtpPassword)
+            script: |
+              curl --url "smtps://$SMTP_SERVER" --ssl-reqd \
+                --mail-from "$SMTP_USERNAME" \
+                --mail-rcpt "recipient@example.com" \
+                --upload-file mail.txt \
+                --user "$SMTP_USERNAME:$SMTP_PASSWORD"
+          - script: |
+              echo "##vso[task.setvariable variable=testOutputPath]$(buildOutputPath)/testResults"
+            displayName: 'Set Test Output Path'
+
+  - stage: Deploy
+    displayName: 'Deploy Stage'
+    dependsOn: Test
+    variables:
+      # Local Variables for Deploy Stage
+      - name: environmentName
+        value: ${{ parameters.environment }}
+      - name: testOutputPath
+        value: $[ dependencies.Test.outputs['TestJob.testOutputPath'] ]
+    jobs:
+      - deployment: DeployJob
+        displayName: 'Deploying the code'
+        environment: $(environmentName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: echo "Deploying to $(environmentName) environment using files from $(testOutputPath)"
+                  displayName: 'Deploying'
+                - script: echo "Sending email notification..."
+                  displayName: 'Send email notification'
+                  env:
+                    SMTP_SERVER: $(smtpServer)
+                    SMTP_USERNAME: $(smtpUsername)
+                    SMTP_PASSWORD: $(smtpPassword)
+                  script: | 
+                    curl --url "smtps://$SMTP_SERVER" --ssl-reqd \ 
+                      --mail-from "$SMTP_USERNAME" \
+                      --mail-rcpt "recipient@example.com" \
+                      --upload-file mail.txt \
+                      --user "$SMTP_USERNAME:$SMTP_PASSWORD"
